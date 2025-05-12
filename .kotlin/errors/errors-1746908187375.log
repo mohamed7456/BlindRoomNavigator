@@ -1,0 +1,5 @@
+kotlin version: 2.0.21
+error message: The daemon has terminated unexpectedly on startup attempt #1 with error code: 1. The daemon process output:
+    1. Error occurred during initialization of VM
+    2. Could not reserve enough space for object heap
+
