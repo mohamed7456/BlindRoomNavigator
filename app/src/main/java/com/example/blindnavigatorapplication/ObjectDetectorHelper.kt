@@ -28,7 +28,7 @@ import android.media.Image
 
 class ObjectDetectorHelper(
     private val context: Context,
-    private val doorModelFilename: String = "yolov8n_door_fine_tuned.tflite",
+    private val doorModelFilename: String = "yolov8n_doors_fine_tuned.tflite",
     private val obstacleModelFilename: String = "yolov8n.tflite",
     private val onDetection: (results: List<DetectionResult>, imageWidth: Int, imageHeight: Int) -> Unit
 ) {
