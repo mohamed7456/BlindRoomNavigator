@@ -1,302 +1,231 @@
 package com.example.blindnavigatorapplication
 
 import android.Manifest
-import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.util.Log
-import android.view.ViewGroup
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.annotation.OptIn
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageProxy
-import androidx.camera.core.Preview as CameraPreview
+import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.Button
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.blindnavigatorapplication.ui.theme.BlindNavigatorApplicationTheme
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.objects.ObjectDetection
-import com.google.mlkit.vision.objects.DetectedObject
-import com.google.mlkit.vision.objects.defaults.ObjectDetectorOptions
-import java.util.*
+import java.util.Locale
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-class MainActivity : ComponentActivity() {
-    private val requiredPermissions = arrayOf(
-        Manifest.permission.CAMERA,
-        Manifest.permission.RECORD_AUDIO
-    )
+class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
-    private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
-    private var permissionsGranted by mutableStateOf(false)
+    private lateinit var objectDetectorHelper: ObjectDetectorHelper
+    private lateinit var navigationManager: NavigationManager
+    private var tts: TextToSpeech? = null
+    private lateinit var cameraExecutor: ExecutorService
+    private lateinit var previewView: PreviewView
+
+    private val ttsInitialized = mutableStateOf(false)
+
+    private val activityResultLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+            var permissionGranted = true
+            permissions.entries.forEach {
+                if (it.key in REQUIRED_PERMISSIONS && !it.value)
+                    permissionGranted = false
+            }
+            if (!permissionGranted) {
+                Toast.makeText(this, "Camera permission request denied.", Toast.LENGTH_SHORT).show()
+            } else {
+                // Permissions granted, proceed with camera setup via LaunchedEffect
+                // The LaunchedEffect observing permissions will trigger startCamera
+            }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-
-        permissionLauncher = registerForActivityResult(
-            ActivityResultContracts.RequestMultiplePermissions()
-        ) { grants ->
-            permissionsGranted = grants.all { it.value }
-        }
+        tts = TextToSpeech(this, this)
+        cameraExecutor = Executors.newSingleThreadExecutor()
 
         setContent {
             BlindNavigatorApplicationTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    Box(modifier = Modifier.padding(innerPadding)) {
-                        if (permissionsGranted || allPermissionsGranted()) {
-                            CameraPreviewScreen()
+                val context = LocalContext.current
+//                val lifecycleOwner = LocalLifecycleOwner.current
+                val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
+                val permissionsGranted = remember { mutableStateOf(allPermissionsGranted()) }
+
+                objectDetectorHelper = remember {
+                    ObjectDetectorHelper(context) { results, width, height ->
+                        if (::navigationManager.isInitialized) {
+                            navigationManager.handleDetections(results, width, height)
                         } else {
-                            PermissionRequestScreen {
-                                permissionLauncher.launch(requiredPermissions)
+                            Log.w(TAG, "NavigationManager not ready, skipping detection handling.")
+                        }
+                    }
+                }
+
+                LaunchedEffect(ttsInitialized.value) {
+                    if (ttsInitialized.value) {
+                        navigationManager = NavigationManager(tts)
+                        Log.d(TAG, "NavigationManager initialized.")
+                    }
+                }
+
+
+                Box(modifier = Modifier.fillMaxSize()) {
+                    AndroidView(
+                        factory = { ctx ->
+                            previewView = PreviewView(ctx).apply {
+                                implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                             }
-                        }
+                            previewView
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                        update = { /* No specific update needed here for PreviewView itself */ }
+                    )
+                }
+
+                // Effect to handle permissions and start camera
+                LaunchedEffect(permissionsGranted.value, cameraProviderFuture) {
+                    if (!permissionsGranted.value) {
+                        requestPermissions()
+                    } else {
+                        val cameraProvider = cameraProviderFuture.get()
+                        bindCameraUseCases(cameraProvider)
                     }
                 }
-            }
-        }
-    }
-
-    private fun allPermissionsGranted() = requiredPermissions.all {
-        ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
-    }
-}
-
-@OptIn(ExperimentalGetImage::class)
-@Composable
-fun CameraPreviewScreen() {
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
-    var previewView by remember { mutableStateOf<PreviewView?>(null) }
-    val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
-    var lastAnnouncementTime by remember { mutableStateOf(0L) }
-
-    // TextToSpeech initialization
-    var tts: TextToSpeech? by remember { mutableStateOf(null) }
-
-    LaunchedEffect(Unit) {
-        tts = TextToSpeech(context, object : TextToSpeech.OnInitListener {
-            override fun onInit(status: Int) {
-                if (status == TextToSpeech.SUCCESS) {
-                    tts?.language = Locale.US
+                LaunchedEffect(Unit) {
+                    permissionsGranted.value = allPermissionsGranted()
                 }
             }
-        })
-    }
-
-    // Object detection setup
-    val objectDetector = remember {
-        ObjectDetectorHelper(context) { detectedObjects ->
-            val now = System.currentTimeMillis()
-            if (now - lastAnnouncementTime > 2000) {
-                handleDetectedObjects(detectedObjects, tts)
-                lastAnnouncementTime = now
-            }
         }
     }
 
-    LaunchedEffect(previewView) {
-        previewView?.let { pv ->
-            val cameraProvider = cameraProviderFuture.get()
-            val preview = CameraPreview.Builder().build().also {
-                it.setSurfaceProvider(pv.surfaceProvider)
+    private fun handleDetectionResults(results: List<ObjectDetectorHelper.DetectionResult>, imageWidth: Int, imageHeight: Int) {
+        if (::navigationManager.isInitialized) {
+            runOnUiThread {
+                navigationManager.handleDetections(results, imageWidth, imageHeight)
             }
-
-            val analysis = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build()
-                .also {
-                    it.setAnalyzer(cameraExecutor) { imageProxy ->
-                        if (imageProxy.image != null) {
-                            objectDetector.detectObjects(imageProxy)
-                        } else {
-                            imageProxy.close()
-                        }
-                    }
-                }
-
-            try {
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(
-                    lifecycleOwner,
-                    CameraSelector.DEFAULT_BACK_CAMERA,
-                    preview,
-                    analysis
-                )
-            } catch (exc: Exception) {
-                Log.e("BlindNavigator", "Use case binding failed", exc)
-            }
-        }
-    }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            tts?.shutdown()
-            objectDetector.cleanup()
-        }
-    }
-
-    CameraPreviewView(
-        modifier = Modifier.fillMaxSize(),
-        onInitialized = { previewView = it }
-    )
-}
-
-class ObjectDetectorHelper(
-    private val context: Context,
-    private val onDetection: (List<DetectedObject>) -> Unit
-) {
-    private val options = ObjectDetectorOptions.Builder()
-        .setDetectorMode(ObjectDetectorOptions.STREAM_MODE)
-        .enableClassification()
-        .build()
-
-    private val objectDetector = ObjectDetection.getClient(options)
-
-    @OptIn(ExperimentalGetImage::class)
-    fun detectObjects(imageProxy: ImageProxy) {
-        val image = InputImage.fromMediaImage(
-            imageProxy.image!!,
-            imageProxy.imageInfo.rotationDegrees
-        )
-
-        objectDetector.process(image)
-            .addOnSuccessListener { detectedObjects ->
-                onDetection(detectedObjects)
-            }
-            .addOnFailureListener { e ->
-                Log.e("ObjectDetection", "Detection failed", e)
-            }
-            .addOnCompleteListener {
-                imageProxy.close()
-            }
-    }
-
-    fun cleanup() {
-        objectDetector.close()
-    }
-}
-
-private fun handleDetectedObjects(
-    detectedObjects: List<DetectedObject>,
-    tts: TextToSpeech?
-) {
-    val obstacles = detectedObjects.filter {
-        it.labels.any { label -> label.confidence > 0.5f }
-    }
-
-    tts?.let {
-        if (obstacles.isEmpty()) {
-            it.speak(
-                "Move forward",
-                TextToSpeech.QUEUE_FLUSH,
-                null,
-                "move_forward"
-            )
         } else {
-            val mainObstacle = obstacles.maxByOrNull { obj ->
-                obj.boundingBox.width() * obj.boundingBox.height()
-            }
-            mainObstacle?.let { obstacle ->
-                val screenCenter = 0.5f
-                val obstacleCenterX = obstacle.boundingBox.exactCenterX() / screenCenter
+            Log.w(TAG, "NavigationManager not ready, skipping detection handling.")
+        }
+    }
 
-                when {
-                    obstacleCenterX < 0.4 -> it.speak(
-                        "Obstacle left, move right",
-                        TextToSpeech.QUEUE_FLUSH,
-                        null,
-                        "left_obstacle"
-                    )
-                    obstacleCenterX > 0.6 -> it.speak(
-                        "Obstacle right, move left",
-                        TextToSpeech.QUEUE_FLUSH,
-                        null,
-                        "right_obstacle"
-                    )
-                    else -> it.speak(
-                        "Obstacle ahead, turn 45 degrees",
-                        TextToSpeech.QUEUE_FLUSH,
-                        null,
-                        "center_obstacle"
-                    )
+
+    private fun bindCameraUseCases(cameraProvider: ProcessCameraProvider) {
+        val cameraSelector = CameraSelector.Builder()
+            .requireLensFacing(CameraSelector.LENS_FACING_BACK)
+            .build()
+
+        val preview = Preview.Builder()
+            .build()
+            .also {
+                it.setSurfaceProvider(previewView.surfaceProvider)
+            }
+
+        val imageAnalysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+            .also {
+                it.setAnalyzer(cameraExecutor) { imageProxy ->
+                    objectDetectorHelper.processImageProxy(imageProxy)
                 }
             }
+
+        try {
+            cameraProvider.unbindAll()
+
+            cameraProvider.bindToLifecycle(
+                this,
+                cameraSelector,
+                preview,
+                imageAnalysis
+            )
+            Log.d(TAG, "Camera use cases bound successfully.")
+
+        } catch (exc: Exception) {
+            Log.e(TAG, "Use case binding failed", exc)
+            Toast.makeText(this, "Error starting camera: ${exc.message}", Toast.LENGTH_SHORT).show()
         }
     }
-}
 
-@Composable
-fun PermissionRequestScreen(onRequest: () -> Unit) {
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("Camera and Audio permissions are required.", style = MaterialTheme.typography.bodyMedium)
-            Spacer(modifier = Modifier.height(16.dp))
-            Button(onClick = onRequest) {
-                Text("Grant Permissions")
+    // --- Permissions Handling ---
+
+    private fun allPermissionsGranted() = REQUIRED_PERMISSIONS.all {
+        ContextCompat.checkSelfPermission(baseContext, it) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun requestPermissions() {
+        activityResultLauncher.launch(REQUIRED_PERMISSIONS)
+    }
+
+    // --- TextToSpeech.OnInitListener Implementation ---
+
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            val result = tts?.setLanguage(Locale.US) // Set language, check result
+            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                Log.e(TAG, "TTS language (US English) not supported or missing data.")
+                Toast.makeText(this, "TTS Language not supported.", Toast.LENGTH_SHORT).show()
+                tts = null
+            } else {
+                Log.d(TAG, "TTS Engine Initialized successfully.")
             }
+        } else {
+            Log.e(TAG, "TTS Initialization Failed! Status: $status")
+            Toast.makeText(this, "TTS Initialization Failed.", Toast.LENGTH_SHORT).show()
+            tts = null
+        }
+        ttsInitialized.value = true
+    }
+
+
+    override fun onResume() {
+        super.onResume()
+        if (allPermissionsGranted()) {
+        } else if (!shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)){
         }
     }
-}
 
-@Composable
-fun CameraPreviewView(
-    modifier: Modifier = Modifier,
-    onInitialized: (PreviewView) -> Unit
-) {
-    AndroidView(
-        factory = { context ->
-            PreviewView(context).apply {
-                scaleType = PreviewView.ScaleType.FILL_CENTER
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
-                onInitialized(this)
-            }
-        },
-        modifier = modifier
-    )
-}
+    override fun onPause() {
+        super.onPause()
+        // Stop TTS speech if playing
+        tts?.stop()
+        Log.d(TAG, "TTS stopped in onPause.")
+        // Camera use cases are paused by bindToLifecycle automatically
+    }
 
-@Composable
-fun Greeting(name: String, modifier: Modifier = Modifier) {
-    Text(
-        text = "Hello $name!",
-        modifier = modifier
-    )
-}
+    override fun onDestroy() {
+        super.onDestroy()
+        // Shutdown TTS
+        tts?.stop()
+        tts?.shutdown()
+        Log.d(TAG, "TTS shutdown.")
 
-@Preview(showBackground = true)
-@Composable
-fun GreetingPreview() {
-    BlindNavigatorApplicationTheme {
-        Greeting("Android")
+        // Shutdown Camera Executor
+        cameraExecutor.shutdown()
+        Log.d(TAG, "Camera executor shutdown.")
+
+        // Cleanup detector resources
+        if (::objectDetectorHelper.isInitialized) {
+            objectDetectorHelper.cleanup()
+        }
+    }
+
+    companion object {
+        private const val TAG = "MainActivity"
+        private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
     }
 }

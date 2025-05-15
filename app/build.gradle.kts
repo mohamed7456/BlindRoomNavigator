@@ -1,3 +1,8 @@
+import com.android.build.api.dsl.AaptOptions
+import com.android.build.api.dsl.AndroidResources
+
+// app/build.gradle.kts
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -18,6 +23,11 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    fun AndroidResources.() {
+        noCompress.add("tflite")
+    }
+
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -37,15 +47,25 @@ android {
     buildFeatures {
         compose = true
     }
+    composeOptions {
+        kotlinCompilerExtensionVersion = "1.5.3"
+    }
 }
 
 dependencies {
+    // --- CameraX ---
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+
+    // --- ML Kit & Other Services ---
     implementation(libs.barcode.scanning)
     implementation(libs.play.services.mlkit.text.recognition)
-
     implementation(libs.object1.detection.v1700)
     implementation(libs.object1.detection.custom.v1700)
 
+    // --- Core & Lifecycle & Compose ---
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
@@ -54,6 +74,8 @@ dependencies {
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
+
+    // --- Testing ---
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
@@ -61,10 +83,11 @@ dependencies {
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
-    // CameraX core and view
-    implementation(libs.androidx.camera.core)
-    implementation(libs.androidx.camera.camera2)
-    implementation(libs.androidx.camera.lifecycle)
-    implementation(libs.androidx.camera.view)
 
+    // --- TensorFlow Lite ---
+    implementation(libs.tensorflow.lite)
+    implementation(libs.tensorflow.lite.support)
+
+    // --- Image Processing ---
+    implementation(libs.androidx.exifinterface)
 }
